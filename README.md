@@ -58,6 +58,8 @@ npm run build
 
 ## 공식 문서
 
+진행 현황은 [작업 중단 기록](docs/HANDOFF.md), 비공식 API와 기존 사이트 조사는 [데이터 원천 조사](docs/DATA_SOURCES.md)를 참고하세요.
+
 - [OpenAI 추론 모델](https://developers.openai.com/api/docs/guides/reasoning): API 노력 값은 `low`, `medium`, `high` 등입니다.
 - [웹 검색](https://developers.openai.com/api/docs/guides/tools-web-search)
 - [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
