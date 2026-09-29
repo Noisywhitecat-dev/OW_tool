@@ -1,15 +1,17 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { demoSnapshot } from '../shared/demo';
+import bundledSnapshot from '../meta/current.json';
 import { defaultSettings } from '../shared/prompts';
 import { settingsSchema, validateSnapshot, type Settings, type Snapshot } from '../shared/schema';
 
 export class Store {
   private queue: Promise<unknown> = Promise.resolve();
   private settings: Settings = structuredClone(defaultSettings);
-  private snapshot: Snapshot = structuredClone(demoSnapshot);
-  constructor(private directory = resolve(process.env.DATA_DIR || './data')) {}
+  private snapshot: Snapshot;
+  constructor(private directory = resolve(process.env.DATA_DIR || './data'), initialSnapshot?: Snapshot) {
+    this.snapshot = validateSnapshot(structuredClone(initialSnapshot ?? bundledSnapshot));
+  }
   async initialize() {
     await mkdir(this.directory, { recursive: true });
     const read = async (name: string) => {
@@ -23,6 +25,7 @@ export class Store {
   }
   getSettings() { return structuredClone(this.settings); }
   getSnapshot() { return structuredClone(this.snapshot); }
+
   private save(name: string, data: unknown, commit: () => void) {
     const work = this.queue.then(async () => {
       const temporary = join(this.directory, `${name}.${randomUUID()}.tmp`);

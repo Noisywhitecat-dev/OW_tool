@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { rankSchema, statisticsSchema, validateStatistics } from './statistics';
 
 export const roleSchema = z.enum(['tank', 'damage', 'support']);
 export type Role = z.infer<typeof roleSchema>;
@@ -8,7 +9,7 @@ export const slots: Role[] = ['tank', 'damage', 'damage', 'support', 'support'];
 const id = z.string().min(1).max(100);
 const note = z.string().max(1000);
 const evidenceSchema = z.object({ score: z.number().min(-1).max(1), reason: note, sourceIds: z.array(id) });
-const scopeSchema = z.object({ platform: z.literal('PC'), queue: z.literal('5v5-role'), rank: z.enum(['all', 'bronze', 'silver', 'gold', 'platinum', 'diamond', 'master', 'grandmaster', 'champion']) });
+const scopeSchema = z.object({ platform: z.literal('PC'), queue: z.literal('5v5-role'), rank: rankSchema });
 export type Scope = z.infer<typeof scopeSchema>;
 
 export const metaContentSchema = z.object({
@@ -32,6 +33,7 @@ export const metaContentSchema = z.object({
 });
 export const snapshotSchema = metaContentSchema.extend({
   id, schemaVersion: z.literal(1), kind: z.enum(['demo', 'live']), createdAt: z.iso.datetime(),
+  statistics: statisticsSchema.optional(),
 });
 export type MetaContent = z.infer<typeof metaContentSchema>;
 export type Snapshot = z.infer<typeof snapshotSchema>;
@@ -39,6 +41,10 @@ export type Hero = Snapshot['heroes'][number];
 
 export function validateSnapshot(value: unknown): Snapshot {
   const meta = snapshotSchema.parse(value);
+  if (meta.statistics) {
+    validateStatistics(meta.statistics);
+    if (meta.statistics.requestedRank !== meta.scope.rank) throw new Error('메타와 통계의 티어 불일치');
+  }
   const unique = (values: string[], label: string) => {
     if (new Set(values).size !== values.length) throw new Error(`${label}: 중복 항목이 있습니다.`);
   };
@@ -64,12 +70,9 @@ export function validateSnapshot(value: unknown): Snapshot {
 }
 
 export const settingsSchema = z.object({
-  researchModel: z.string().regex(/^[a-zA-Z0-9._-]+$/).max(100),
-  researchEffort: z.literal('high'),
+  provider: z.enum(['gemini', 'openai']).default('openai'),
   rankingModel: z.string().regex(/^[a-zA-Z0-9._-]+$/).max(100),
   rankingEffort: z.enum(['low', 'medium']),
-  scope: scopeSchema,
-  researchPrompt: z.string().min(100).max(20000),
 });
 export type Settings = z.infer<typeof settingsSchema>;
 export const recommendationInputSchema = z.object({

@@ -70,20 +70,20 @@ describe('ranking contracts', () => {
 describe('persistence and local API', () => {
   let directory: string;
   let store: Store;
-  beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), 'ow-tool-test-')); store = new Store(directory); await store.initialize(); });
+  beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), 'ow-tool-test-')); store = new Store(directory, demoSnapshot); await store.initialize(); });
   afterEach(async () => {
     if (!resolve(directory).startsWith(resolve(tmpdir()) + '\\ow-tool-test-') && !resolve(directory).startsWith(resolve(tmpdir()) + '/ow-tool-test-')) throw new Error('Unsafe test cleanup');
     await rm(directory, { recursive: true });
   });
-  it('persists the selected tier across restarts', async () => {
-    await store.saveSettings({ ...defaultSettings, scope: { ...defaultSettings.scope, rank: 'diamond' } });
-    const restarted = new Store(directory); await restarted.initialize();
-    expect(restarted.getSettings().scope.rank).toBe('diamond');
+  it('persists recommendation settings across restarts', async () => {
+    await store.saveSettings({ ...defaultSettings, rankingEffort: 'medium' });
+    const restarted = new Store(directory, demoSnapshot); await restarted.initialize();
+    expect(restarted.getSettings().rankingEffort).toBe('medium');
   });
   it('preserves an existing snapshot when new data fails validation', async () => {
     await store.saveSnapshot(demoSnapshot);
     expect(() => store.saveSnapshot({ ...demoSnapshot, heroes: [] })).toThrow();
-    const restarted = new Store(directory); await restarted.initialize();
+    const restarted = new Store(directory, demoSnapshot); await restarted.initialize();
     expect(restarted.getSnapshot().id).toBe('demo-v1');
   });
   it('returns five local demo picks without making paid calls', async () => {
