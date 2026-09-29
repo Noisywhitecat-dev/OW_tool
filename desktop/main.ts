@@ -33,7 +33,7 @@ else {
     });
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('Local server unavailable');
     const origin = `http://127.0.0.1:${address.port}`;
-    window = new BrowserWindow({ width: 1360, height: 920, minWidth: 900, minHeight: 650, show: false, title: 'OW Compass', backgroundColor: '#10151c',
+    window = new BrowserWindow({ width: 1280, height: 760, minWidth: 900, minHeight: 650, show: false, title: 'OW Compass', backgroundColor: '#10151c',
       autoHideMenuBar: true, webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     const contents = window.webContents;
     contents.session.webRequest.onBeforeSendHeaders({ urls: [origin + '/*'] }, (details, callback) => callback({ requestHeaders: { ...details.requestHeaders, 'X-OW-Session': token } }));

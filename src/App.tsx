@@ -1,116 +1,131 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Check, ChevronRight, Compass, Crosshair, Database, ExternalLink, HeartPulse, Info, LoaderCircle, MapPin, RefreshCw, Search, Settings2, Shield, Sparkles, Swords, X } from 'lucide-react';
-import { roleNames, roles, slots, type Candidate, type Hero, type Job, type RecommendationInput, type RecommendationResult, type Role, type Settings, type Snapshot } from '../shared/schema';
+import { ChevronDown, Crosshair, ExternalLink, HeartPulse, LoaderCircle, Search, Settings2, Shield, Undo2, X } from 'lucide-react';
+import { roleNames, roles, slots, type Candidate, type RecommendationInput, type RecommendationResult, type Role, type Settings, type Snapshot } from '../shared/schema';
 import { rankLocally } from '../shared/ranking';
 import { SettingsPanel } from './SettingsPanel';
+import { blankTeam, initialInput, matchesHero, nextEmpty, positions, reconcileInput, type Position } from './quickInput';
 
-type AppState = { snapshot: Snapshot; settings: Settings; keyAvailable: boolean; keysAvailable: { gemini: boolean; openai: boolean }; };
-const ranks: Record<Snapshot['scope']['rank'], string> = { all: '전체 티어', bronze: '브론즈', silver: '실버', gold: '골드', platinum: '플래티넘', emerald: '에메랄드', diamond: '다이아몬드', master: '마스터', grandmaster: '그랜드마스터', champion: '챔피언' };
+type AppState = { snapshot: Snapshot; settings: Settings; keyAvailable: boolean; keysAvailable: { gemini: boolean; openai: boolean } };
 const roleIcons = { tank: Shield, damage: Crosshair, support: HeartPulse };
-const blankTeam = () => [null, null, null, null, null] as (string | null)[];
-const initialInput = (mapId: string): RecommendationInput => ({ mapId, role: 'tank', side: 'either', ownSlot: 0, allies: blankTeam(), enemies: blankTeam() });
-async function api<T>(url: string, body?: unknown, method = 'POST'): Promise<T> {
-  const response = await fetch(url, body === undefined ? undefined : { method, headers: { 'Content-Type': 'application/json', 'X-OW-Tool': '1' }, body: JSON.stringify(body) });
-  if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('서버에 연결할 수 없습니다. 앱 서버가 실행 중인지 확인해 주세요.');
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '요청에 실패했습니다.');
-  return data as T;
+const teamNames = { allies: '우리 팀', enemies: '상대 팀' };
+function RoleIcon({ role }: { role: Role }) { const Icon = roleIcons[role]; return <Icon size={16} />; }
+async function api<T>(url: string, body?: unknown): Promise<T> {
+  const response = await fetch(url, body === undefined ? undefined : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-OW-Tool': '1' }, body: JSON.stringify(body) });
+  if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('앱 서버에 연결할 수 없습니다.');
+  const data = await response.json(); if (!response.ok) throw new Error(data.error || '요청에 실패했습니다.'); return data as T;
 }
-function RoleIcon({ role, size = 18 }: { role: Role; size?: number }) { const Icon = roleIcons[role]; return <Icon size={size} />; }
-function HeroMark({ hero, small = false }: { hero: Hero; small?: boolean }) { return <span className={`hero-mark ${hero.role} ${small ? 'small' : ''}`}><RoleIcon role={hero.role} size={small ? 15 : 24} /></span>; }
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [tab, setTab] = useState<'recommend' | 'settings'>('recommend');
   const [input, setInput] = useState<RecommendationInput>(initialInput('kings-row'));
+  const [active, setActive] = useState<Position>({ team: 'allies', index: 1 });
+  const [query, setQuery] = useState(''), [highlight, setHighlight] = useState(0);
   const [result, setResult] = useState<RecommendationResult | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [picker, setPicker] = useState<{ team: 'allies' | 'enemies'; index: number } | null>(null);
-  const fingerprint = JSON.stringify([state?.snapshot.id, input]);
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [undoInput, setUndoInput] = useState<RecommendationInput | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const highlightedRef = useRef<HTMLButtonElement>(null);
+  const fingerprint = JSON.stringify([state?.snapshot.id, state?.settings, input]);
   const current = useRef(fingerprint); current.current = fingerprint;
   const load = async () => {
     const data = await api<AppState>('/api/state');
-    setState(data); setInput(initialInput(data.snapshot.maps[0].id)); setResult(null);
+    setState(data); setInput(previous => reconcileInput(previous, data.snapshot)); setResult(null); setUndoInput(null);
   };
   useEffect(() => { void load().catch(e => setError(e.message)); }, []);
   useEffect(() => { setResult(null); }, [fingerprint]);
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.key === 'F2' && tab === 'recommend') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
+      if (event.key === 'Escape' && tab === 'settings') setTab('recommend');
+    };
+    window.addEventListener('keydown', focusSearch); return () => window.removeEventListener('keydown', focusSearch);
+  }, [tab]);
   const candidates = useMemo(() => state ? rankLocally(state.snapshot, input).slice(0, 5) : [], [state, input]);
-  const mapRanks = useMemo(() => state ? roles.map(role => ({ role, candidates: rankLocally(state.snapshot, { ...initialInput(input.mapId), role, ownSlot: slots.indexOf(role) }).slice(0, 5) })) : [], [state?.snapshot, input.mapId]);
+  const role = slots[active.index];
+  const heroes = useMemo(() => state?.snapshot.heroes.filter(h => h.role === role && matchesHero(h, query)) ?? [], [state?.snapshot, role, query]);
+  const available = heroes.filter(h => !input[active.team].some((id, index) => id === h.id && index !== active.index));
+  const highlighted = available[Math.min(highlight, Math.max(0, available.length - 1))]?.id;
+  useEffect(() => { highlightedRef.current?.scrollIntoView({ block: 'nearest' }); }, [highlighted]);
+  const focus = () => { requestAnimationFrame(() => searchRef.current?.focus()); };
+  const change = (value: RecommendationInput) => { if (JSON.stringify(value) !== JSON.stringify(input)) { setUndoInput(input); setInput(value); } };
+  const activate = (position: Position) => { setActive(position); setQuery(''); setHighlight(0); focus(); };
+  const select = (heroId: string | null) => {
+    const wasEmpty = !input[active.team][active.index];
+    const value = { ...input, [active.team]: input[active.team].map((id, index) => index === active.index ? heroId : id) };
+    change(value); setQuery(''); setHighlight(0);
+    // During a swap, keep this slot active. Only first-time entry advances.
+    if (heroId && wasEmpty) { const next = nextEmpty(value, active); if (next) setActive(next); }
+    focus();
+  };
+  const changeRole = (role: Role) => {
+    const ownSlot = slots.indexOf(role), allies = [...input.allies]; allies[ownSlot] = null;
+    const value = { ...input, role, ownSlot, allies }; change(value);
+    if (active.team === 'allies' && active.index === ownSlot) activate(nextEmpty(value, active) ?? positions(value)[0]);
+  };
+  const undo = () => {
+    if (!undoInput) return;
+    setInput(undoInput); setUndoInput(null);
+    if (active.team === 'allies' && active.index === undoInput.ownSlot) activate(positions(undoInput)[0]);
+    setQuery(''); setHighlight(0);
+  };
   const recommend = async () => {
+    if (busy) return;
     const captured = fingerprint; setBusy(true); setError('');
     try { const value = await api<RecommendationResult>('/api/recommend', input); if (captured === current.current) setResult(value); }
-    catch (e) { setError((e as Error).message); }
+    catch (e) { if (captured === current.current) setError((e as Error).message); }
     finally { setBusy(false); }
   };
-  if (!state) return <main className="loading"><Compass size={42} /><h1>OW COMPASS</h1><p>{error || '픽 가이드를 준비하고 있습니다…'}</p>{error && <button onClick={() => { setError(''); void load().catch(e => setError(e.message)); }}>다시 연결</button>}</main>;
-  const { snapshot, settings } = state;
-  const map = snapshot.maps.find(m => m.id === input.mapId)!;
-  const isDemo = snapshot.kind === 'demo';
+  if (!state) return <main className="loading"><h1>OW Compass</h1><p>{error || '불러오는 중…'}</p>{error && <button className="secondary" onClick={() => void load().catch(e => setError(e.message))}>다시 연결</button>}</main>;
+  const { snapshot } = state;
   const selected = input.allies.filter(Boolean).length + input.enemies.filter(Boolean).length;
   const display = result?.candidates ?? candidates;
-  const age = Date.now() - Date.parse(snapshot.createdAt);
+  const stale = Date.now() - Date.parse(snapshot.createdAt) > 14 * 86400000;
 
   return <div className="app-shell">
-    <aside className="sidebar">
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); setTab('recommend'); }}><span className="brand-icon"><Compass size={25} /></span><span>OW <b>COMPASS</b><small>YOUR NEXT PICK.</small></span></a>
-      <p className="nav-label">PLAYBOOK</p>
-      <nav aria-label="주 메뉴">
-        <button className={tab === 'recommend' ? 'active' : ''} onClick={() => setTab('recommend')}><Crosshair size={19} /> 영웅 추천 <ChevronRight size={15} /></button>
-        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}><Database size={19} /> 메타 · 설정</button>
-      </nav>
-      <div className="sidebar-note"><span className="eyebrow">LESS GUESSING.<br />BETTER PICKS.</span><p>맵을 읽고, 조합을 맞추고.<br />다음 한타를 준비하세요.</p><div className="compass-art"><Compass size={126} strokeWidth={.55} /></div></div>
-      <div className="sidebar-bottom"><span className={`status-dot ${isDemo ? 'demo' : ''}`} /><span>{isDemo ? '체험 모드' : '저장된 메타 사용 중'}<small>PC · 5대5 경쟁전</small></span><span className="version">v0.1</span></div>
-    </aside>
-    <div className="workspace">
-      <header className="topbar"><div><span>플레이북</span><ChevronRight size={14} /><strong>{tab === 'recommend' ? '영웅 추천' : '메타 · 설정'}</strong></div><span className="top-status"><span className="status-dot" /> {isDemo ? '예시 데이터 연결됨' : `메타 기준 · ${snapshot.patchDate}`}</span></header>
-      <main>
-        <div className={`notice ${isDemo ? '' : 'live-notice'}`}><Info size={17} /><span>{isDemo ? '지금은 체험 모드입니다. 표시되는 티어와 점수는 예시이며 실제 시즌 메타가 아닙니다.' : `${snapshot.patch} · ${ranks[snapshot.scope.rank]} 기준 · ${new Date(snapshot.createdAt).toLocaleDateString('ko-KR')} 저장`}</span><button onClick={() => setTab('settings')}>{isDemo ? '메타 파일 적용' : '메타 관리'} <ArrowRight size={14} /></button></div>
-        {!isDemo && age > 14 * 86400000 && <p className="inline-warning">저장된 메타가 14일 이상 지났습니다. 최근 밸런스 패치가 있었는지 확인해 주세요.</p>}
-        {error && <div className="error" role="alert">{error}<button aria-label="오류 닫기" onClick={() => setError('')}><X size={16} /></button></div>}
-        {tab === 'settings' ? <SettingsPanel state={state} onRefresh={load} onError={setError} /> : <>
-          <div className="page-heading"><div><p className="eyebrow accent">A LITTLE INTEL. A BETTER GAME.</p><h1>다음 한타를 바꾸는 선택<span>.</span></h1><p>전장과 팀 조합에 맞는, 지금 가장 필요한 영웅을 찾아보세요.</p></div><span className="mode-tag"><Swords size={15} /> 경쟁전 · 역할 고정</span></div>
-          <section className="map-section">
-            <div className="section-title"><h2><span>01</span> 전장 선택</h2><span className="muted">{isDemo ? '체험용 ' : ''}{snapshot.maps.length}개 전장</span></div>
-            <div className="map-layout">
-              <div className={`map-visual map-${snapshot.maps.indexOf(map) % 3}`}><div className="map-grid" /><MapPin className="map-pin" size={45} strokeWidth={1} /><span className="map-coordinate">TACTICAL OVERVIEW / {String(snapshot.maps.indexOf(map) + 1).padStart(2, '0')}</span><div className="map-copy"><span className="mode-pill">{map.mode}</span><h3>{map.name}</h3><p>{map.description}</p><div>{map.tags.map(t => <span className="map-tag" key={t}>{t}</span>)}</div></div></div>
-              <div className="map-controls"><label htmlFor="map-choice">이번 경기의 전장</label><select id="map-choice" value={input.mapId} onChange={e => setInput(i => ({ ...i, mapId: e.target.value }))}>{snapshot.maps.map(m => <option key={m.id} value={m.id}>{m.name} · {m.mode}</option>)}</select><label>진영</label><div className="segmented">{([['either', '전체'], ['attack', '공격'], ['defense', '수비']] as const).map(([side, label]) => <button key={side} className={input.side === side ? 'selected' : ''} aria-pressed={input.side === side} onClick={() => setInput(i => ({ ...i, side }))}>{label}</button>)}</div><p className="hint">맵 기본 추천은 즉시 계산됩니다.<br />공격·수비 상황은 AI 정렬 시 함께 고려합니다.</p></div>
-            </div>
-            <div className="map-hero-grid">{mapRanks.map(({ role, candidates }) => <div className="map-role" key={role}><div className={`map-role-heading ${role}`}><RoleIcon role={role} /><h3>{roleNames[role]} 추천</h3><span>TOP 5</span></div><div className="map-hero-list">{candidates.map((c, i) => <div key={c.hero.id}><span className="tiny-rank">{i + 1}</span><span>{c.hero.name}</span><span className={`tier tier-${c.hero.tier}`}>{c.hero.tier === 'unknown' ? '?' : c.hero.tier}</span></div>)}</div></div>)}</div>
+    <header className="app-header"><button className="brand" onClick={() => setTab('recommend')}><Crosshair size={20} /><h1>OW Compass</h1></button><span className="meta-status">{snapshot.kind === 'demo' ? '예시 메타' : `메타 ${snapshot.patchDate}`}{stale && ' · 갱신 확인'}</span><button className={`settings-toggle ${tab === 'settings' ? 'selected' : ''}`} onClick={() => setTab(tab === 'settings' ? 'recommend' : 'settings')}><Settings2 size={16} />{tab === 'settings' ? '경기로 돌아가기' : '메타 · 설정'}</button></header>
+    {error && <div className="error" role="alert">{error}<button aria-label="오류 닫기" onClick={() => setError('')}><X size={16} /></button></div>}
+    {tab === 'settings' ? <main className="settings-scroll"><SettingsPanel state={state} onRefresh={load} onError={setError} /></main> : <main className="match-screen">
+      <section className="match-controls" aria-label="경기 설정">
+        <label className="map-choice">전장<select aria-label="전장" value={input.mapId} onChange={e => change({ ...input, mapId: e.target.value })}>{snapshot.maps.map(m => <option key={m.id} value={m.id}>{m.name} · {m.mode}</option>)}</select></label>
+        <div className="control-group"><span>내 역할</span><div className="segmented">{roles.map(role => <button key={role} aria-pressed={input.role === role} className={input.role === role ? 'selected' : ''} onClick={() => changeRole(role)}><RoleIcon role={role} />{roleNames[role]}</button>)}</div></div>
+        <div className="control-group side-controls"><span>진영 <small>AI 정렬에 반영</small></span><div className="segmented">{([['either', '전체'], ['attack', '공격'], ['defense', '수비']] as const).map(([side, label]) => <button key={side} aria-pressed={input.side === side} className={input.side === side ? 'selected' : ''} onClick={() => change({ ...input, side })}>{label}</button>)}</div></div>
+        <button className="secondary new-match" onClick={() => { change({ ...input, side: 'either', allies: blankTeam(), enemies: blankTeam() }); activate(positions(input)[0]); }}>조합 초기화</button>
+      </section>
+      <div className="battle-layout">
+        <section className="lineup-panel" aria-label="조합 입력">
+          <div className="lineup-heading"><h2>조합 <span>{selected}/9</span></h2><button className="text-button" disabled={!undoInput} onClick={undo}><Undo2 size={14} />되돌리기</button></div>
+          <div className="teams">{(['allies', 'enemies'] as const).map(team => <div className={`team-row ${team}`} key={team}><h3>{teamNames[team]}</h3><div className="team-slots">{slots.map((role, index) => {
+            const hero = snapshot.heroes.find(h => h.id === input[team][index]), own = team === 'allies' && index === input.ownSlot;
+            const isActive = active.team === team && active.index === index;
+            return <button key={index} disabled={own} aria-pressed={!own && isActive} className={`team-slot ${own ? 'own' : ''} ${isActive && !own ? 'active' : ''} ${hero ? 'filled' : ''}`} aria-label={`${teamNames[team]} ${roleNames[role]} ${index + 1} ${own ? '내 자리' : hero?.name ?? '선택'}`} onClick={() => activate({ team, index })}><span><RoleIcon role={role} />{roleNames[role]}</span><strong>{own ? '내 자리' : hero?.name ?? '+'}</strong></button>;
+          })}</div></div>)}</div>
+          <section className={`hero-picker ${active.team}`} aria-label="영웅 선택">
+            <div className="picker-heading"><h2>{teamNames[active.team]} <span>{roleNames[role]} {active.index === 2 || active.index === 4 ? '2' : '1'}</span></h2><span>{input[active.team][active.index] ? '영웅 교체' : '영웅 선택'}</span></div>
+            <div className="search-row"><div className="search-field"><Search size={16} /><input ref={searchRef} aria-label="영웅 검색" autoComplete="off" placeholder="이름 / 초성 검색" value={query} onChange={e => { setQuery(e.target.value); setHighlight(0); }} onKeyDown={e => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === 'Enter' && highlighted) { e.preventDefault(); select(highlighted); }
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setHighlight(value => available.length ? (Math.min(value, available.length - 1) + (e.key === 'ArrowDown' ? 1 : -1) + available.length) % available.length : 0); }
+              if (e.key === 'Escape') { setQuery(''); setHighlight(0); e.currentTarget.blur(); }
+            }} /><kbd>F2</kbd></div><button className="secondary clear-slot" disabled={!input[active.team][active.index]} onClick={() => select(null)}>비우기</button></div>
+            <div className="hero-grid">{heroes.map(hero => {
+              const disabled = input[active.team].some((id, index) => id === hero.id && index !== active.index);
+              return <button key={hero.id} ref={hero.id === highlighted ? highlightedRef : null} disabled={disabled} title={disabled ? '이미 선택한 영웅' : undefined} className={`${hero.id === highlighted ? 'highlighted' : ''} ${hero.id === input[active.team][active.index] ? 'picked' : ''}`} aria-label={`${hero.name} 선택`} onClick={() => select(hero.id)}>{hero.name}{hero.id === highlighted && <span aria-hidden="true">↵</span>}</button>;
+            })}{!heroes.length && <p className="empty">검색 결과 없음</p>}</div>
+            <div className="input-help"><span><kbd>↑</kbd><kbd>↓</kbd> 이동 <kbd>Enter</kbd> 선택</span><span role="status">{selected === 9 ? '9명 입력 완료' : '확인한 영웅만 입력'}</span></div>
           </section>
-          <section className="composition-section">
-            <div className="section-title"><h2><span>02</span> 내 역할과 팀 조합</h2><button className="text-button" onClick={() => setInput(i => ({ ...i, allies: blankTeam(), enemies: blankTeam() }))}><RefreshCw size={13} /> 조합 초기화</button></div>
-            <div className="role-select"><span className="muted">내 포지션</span>{roles.map(role => <button key={role} aria-pressed={input.role === role} className={input.role === role ? 'selected' : ''} onClick={() => setInput(i => { const allies = [...i.allies]; const ownSlot = slots.indexOf(role); allies[ownSlot] = null; return { ...i, role, ownSlot, allies }; })}><RoleIcon role={role} />{roleNames[role]}{input.role === role && <Check size={14} />}</button>)}<small>내 자리는 추천 영웅을 위해 비워 둡니다.</small></div>
-            <div className="teams-grid">{(['allies', 'enemies'] as const).map(team => <div className={`team-panel ${team}`} key={team}><div className="team-heading"><h3><span className="team-dot" />{team === 'allies' ? '우리 팀' : '상대 팀'}</h3><span>{team === 'allies' ? '함께 만드는 시너지' : '대응할 핵심 위협'}</span></div><div className="team-slots">{slots.map((role, index) => {
-              const hero = snapshot.heroes.find(h => h.id === input[team][index]); const own = team === 'allies' && input.ownSlot === index;
-              return <button key={index} className={`team-slot ${own ? 'own' : ''} ${hero ? 'filled' : ''}`} disabled={own} aria-label={`${team === 'allies' ? '우리 팀' : '상대 팀'} ${roleNames[role]} ${index + 1}${hero ? ` ${hero.name}` : ' 선택'}`} onClick={() => setPicker({ team, index })}><span className="slot-role">{roleNames[role]}</span>{own ? <Crosshair size={24} /> : hero ? <HeroMark hero={hero} /> : <span className="slot-plus">+</span>}<strong>{own ? '내 자리' : hero?.name ?? '미선택'}</strong>{own && <span className="you-label">YOU</span>}</button>;
-            })}</div><p className="hint">{team === 'allies' ? '아군이 선택한 영웅을 입력하세요.' : '확인한 상대 영웅만 입력해도 됩니다.'}</p></div>)}</div>
-          </section>
-          <section className="recommend-section">
-            <div className="section-title"><h2><span>03</span> 지금 추천하는 {roleNames[input.role]}</h2><span className="result-tag">{result?.mode === 'gpt' ? `${settings.rankingModel} · ${settings.rankingEffort}${result.cached ? ' · 캐시' : ''}` : isDemo ? '예시 · 로컬 계산' : '로컬 기본 순위'}</span></div>
-            <div className="recommend-toolbar"><p><strong>{selected}/9명</strong> 입력됨 <span>·</span> 맵, 티어, 상대 상성, 아군 시너지를 함께 고려합니다.</p><button className="primary" disabled={busy} onClick={() => void recommend()}>{busy ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}{busy ? '추천 분석 중…' : isDemo ? '추천 흐름 체험하기' : 'AI로 추천 정렬'}<ArrowRight size={16} /></button></div>
-            {result?.warning && <p className="inline-warning" role="status">{result.warning}</p>}
-            <div className="recommendations">{display.map((candidate, index) => <RecommendationCard key={candidate.hero.id} candidate={candidate} index={index} snapshot={snapshot} ai={result?.mode === 'gpt'} />)}</div>
-            <p className="footnote">점수는 비교를 위한 지표이며 승률이 아닙니다. {result?.mode === 'gpt' ? 'AI 순위와 로컬 점수 순서는 다를 수 있습니다.' : '메타 30% · 맵 25% · 상대 대응 25% · 아군 시너지 20%.'} 알 수 없는 상성은 중립 점수로 계산합니다.</p>
-          </section>
-        </>}
-        <footer><span>OW COMPASS <span className="footer-divider">/</span> BETTER TOGETHER.</span><span>비공식 팬 프로젝트 · Blizzard와 무관합니다.</span></footer>
-      </main>
-    </div>
-    {picker && <HeroPicker snapshot={snapshot} picker={picker} input={input} onClose={() => setPicker(null)} onSelect={heroId => { setInput(i => { const team = [...i[picker.team]]; team[picker.index] = heroId; return { ...i, [picker.team]: team }; }); setPicker(null); }} />}
+        </section>
+        <section className="results-panel" aria-label="추천 결과"><div className="results-heading"><div><h2>{roleNames[input.role]} 추천</h2><span>{result?.mode === 'gpt' ? `AI 정렬${result.cached ? ' · 캐시' : ''}` : '입력 즉시 계산'}</span></div><button className="primary" disabled={busy || !state.keyAvailable || snapshot.kind === 'demo'} title={!state.keyAvailable ? '메타 · 설정에서 API 키를 저장하세요' : '저장된 메타로 추천 순위 재정렬'} onClick={() => void recommend()}>{busy && <LoaderCircle size={15} className="spin" />}{busy ? '정렬 중' : 'AI 정렬'}</button></div>
+          {!state.keyAvailable && <p className="key-note">AI 키 미설정 · 로컬 추천 사용 중</p>}
+          {result?.warning && <p className="inline-warning" role="status">{result.warning}</p>}
+          <div className="recommendations">{display.map((candidate, index) => <RecommendationCard key={`${fingerprint}:${candidate.hero.id}`} candidate={candidate} index={index} snapshot={snapshot} />)}</div>
+          <details className="scoring-note"><summary>점수 기준 · 데이터 한계</summary><p>비교 점수이며 승률이 아닙니다. 메타 30% · 맵 25% · 상대 25% · 아군 20%. 미확인 상성은 중립 처리합니다. 진영은 AI 정렬에만 반영됩니다. AI 순위와 로컬 점수 순서는 다를 수 있습니다.</p>{snapshot.limitations.map(text => <p key={text}>{text}</p>)}</details>
+        </section>
+      </div>
+    </main>}
   </div>;
 }
 
-function RecommendationCard({ candidate: c, index, snapshot, ai }: { candidate: Candidate; index: number; snapshot: Snapshot; ai: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const metrics = [['meta', '메타'], ['map', '맵 적합'], ['counter', '상대 대응'], ['synergy', '시너지']] as const;
-  return <article className={`recommendation-card ${index === 0 ? 'best' : ''}`}><div className="recommendation-main"><span className="rank-number">{String(index + 1).padStart(2, '0')}</span><HeroMark hero={c.hero} /><div className="hero-description"><div><h3>{c.hero.name}</h3>{index === 0 && <span className="best-label">FIRST PICK</span>}<span className={`tier tier-${c.hero.tier}`}>{c.hero.tier === 'unknown' ? '?' : c.hero.tier}</span></div><p>{c.reasons[0] || '저장된 자료를 기준으로 계산했습니다.'}</p></div><div className="score"><strong>{c.score.toFixed(1)}</strong><span>로컬 점수</span></div><button className="expand" aria-label={`${c.hero.name} 추천 근거 ${expanded ? '접기' : '보기'}`} aria-expanded={expanded} onClick={() => setExpanded(!expanded)}><ChevronRight className={expanded ? 'rotated' : ''} size={19} /></button></div>{expanded && <div className="evidence"><div className="metric-grid">{metrics.map(([key, label]) => <div key={key}><span>{label}<b>{Math.round(c.breakdown[key])}</b></span><div className="metric-track"><div style={{ width: `${c.breakdown[key]}%` }} /></div></div>)}</div><ul>{c.reasons.slice(ai ? 1 : 0, 6).map((reason, i) => <li key={i}>{reason}</li>)}</ul><p className="hint">{c.caution}</p><div className="sources">{snapshot.sources.filter(s => c.sourceIds.includes(s.id)).map(s => <a href={s.url} key={s.id} target="_blank" rel="noreferrer">{s.title}<ExternalLink size={12} /></a>)}</div></div>}</article>;
-}
-
-function HeroPicker({ snapshot, picker, input, onClose, onSelect }: { snapshot: Snapshot; picker: { team: 'allies' | 'enemies'; index: number }; input: RecommendationInput; onClose: () => void; onSelect: (id: string | null) => void }) {
-  const [query, setQuery] = useState('');
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useEffect(() => { dialogRef.current?.showModal(); }, []);
-  const role = slots[picker.index];
-  return <dialog ref={dialogRef} onCancel={onClose} onClick={e => { if (e.target === dialogRef.current) onClose(); }} className="picker"><div className="picker-header"><div><span className="eyebrow">{picker.team === 'allies' ? 'OUR TEAM' : 'ENEMY TEAM'}</span><h2>{roleNames[role]} 선택</h2></div><button onClick={onClose} aria-label="영웅 선택 닫기"><X size={21} /></button></div><div className="search-field"><Search size={18} /><input autoFocus aria-label="영웅 검색" placeholder="영웅 이름 검색" value={query} onChange={e => setQuery(e.target.value)} /></div><div className="picker-grid">{snapshot.heroes.filter(h => h.role === role && `${h.name} ${h.id}`.toLowerCase().includes(query.toLowerCase())).map(hero => <button key={hero.id} disabled={input[picker.team].some((id, index) => id === hero.id && index !== picker.index)} onClick={() => onSelect(hero.id)}><HeroMark hero={hero} /><strong>{hero.name}</strong></button>)}</div><button className="clear-slot" onClick={() => onSelect(null)}>이 자리 비우기</button></dialog>;
+function RecommendationCard({ candidate: c, index, snapshot }: { candidate: Candidate; index: number; snapshot: Snapshot }) {
+  return <details className={`recommendation-card ${index === 0 ? 'best' : ''}`}><summary aria-label={`${index + 1}위 ${c.hero.name} 추천 근거`}><span className="rank-number">{index + 1}</span><div className="hero-description"><h3>{c.hero.name}</h3><span>{index === 0 ? '우선 추천' : roleNames[c.hero.role]}</span></div><div className="score"><strong>{c.score.toFixed(1)}</strong><small>점수</small></div><ChevronDown size={15} /></summary><div className="evidence"><div className="metric-grid">{([['meta', '메타'], ['map', '맵'], ['counter', '상대'], ['synergy', '아군']] as const).map(([key, label]) => <div key={key}>{label}<b>{Math.round(c.breakdown[key])}</b></div>)}</div><ul>{c.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul><p>{c.caution}</p><div className="sources">{snapshot.sources.filter(s => c.sourceIds.includes(s.id)).map(s => <a href={s.url} key={s.id} target="_blank" rel="noreferrer">{s.title}<ExternalLink size={12} /></a>)}</div></div></details>;
 }
